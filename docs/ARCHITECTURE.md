@@ -34,7 +34,7 @@ graph TB
             end
 
             subgraph Cache["Cache Layer"]
-                AR["AtomicReference&lt;CachedData&gt;\n(Caffeine · max 500 · TTL 2 h)"]
+                AR["AtomicRef[CachedData]\n(Caffeine · max 500 · TTL 2 h)"]
                 CD["CachedData\ncountries · continents\ncurrencies · indices"]
             end
 
@@ -80,7 +80,7 @@ sequenceDiagram
     participant CDN as Pull CDN
     participant LB as L7 Load Balancer
     participant Pod as RDAS Pod
-    participant Cache as AtomicReference&lt;CachedData&gt;
+    participant Cache as AtomicRef[CachedData]
     participant SOAP as CountryInfo SOAP
 
     Client->>CDN: GET /api/v1/countries
@@ -102,7 +102,7 @@ sequenceDiagram
     Note over Pod,SOAP: Background refresh (every 1 hour)
     Pod->>SOAP: FullCountryInfoAllCountries (3 SOAP calls)
     SOAP-->>Pod: XML response
-    Pod->>Cache: AtomicReference.set(newSnapshot) — atomic swap
+    Pod->>Cache: AtomicRef.set(newSnapshot) - atomic swap
 ```
 
 ### Cache Lifecycle
