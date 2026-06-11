@@ -26,7 +26,7 @@ graph TB
             subgraph Controllers["Controllers (Spring MVC)"]
                 CC[CountryController\nGET /api/v1/countries]
                 RC[ReferenceDataController\nGET /continents /currencies /languages]
-                CacheCTRL[CacheController\nGET|POST /api/v1/cache]
+                CacheCTRL[CacheController\nGET / POST /api/v1/cache]
             end
 
             subgraph Service["Service Layer"]
