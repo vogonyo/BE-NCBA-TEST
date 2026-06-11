@@ -1,0 +1,60 @@
+spring:
+  application:
+    name: rdas
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=500,expireAfterWrite=7200s
+
+server:
+  port: 8080
+
+# ──────────────────────────────────────────────────
+# Actuator
+# ──────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: Reference Data Aggregation Service (RDAS)
+    version: 1.0.0
+    description: Centralized reference data for countries, currencies, languages and continents
+
+# ──────────────────────────────────────────────────
+# RDAS – SOAP integration
+# ──────────────────────────────────────────────────
+rdas:
+  soap:
+    endpoint: http://webservices.oorsprong.org/websamples.countryinfo/CountryInfoService.wso
+    connect-timeout-ms: 5000
+    read-timeout-ms: 30000
+  cache:
+    refresh-interval-ms: 3600000
+
+# ──────────────────────────────────────────────────
+# SpringDoc / Swagger
+# ──────────────────────────────────────────────────
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+
+# ──────────────────────────────────────────────────
+# Logging
+# ──────────────────────────────────────────────────
+logging:
+  level:
+    com.backend.ncba: INFO
+    org.springframework.web: WARN

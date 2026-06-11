@@ -1,0 +1,41 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rdas-ingress
+  namespace: rdas
+  labels:
+    app: rdas
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # Rate limiting: 100 requests/second per IP
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: rdas.loopdfs.io           # Replace with your domain
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: rdas-svc
+                port:
+                  number: 80
+          - path: /swagger-ui
+            pathType: Prefix
+            backend:
+              service:
+                name: rdas-svc
+                port:
+                  number: 80
+          - path: /api-docs
+            pathType: Prefix
+            backend:
+              service:
+                name: rdas-svc
+                port:
+                  number: 80
