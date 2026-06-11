@@ -4,21 +4,129 @@
 
 ### System Overview
 
+```mermaid
+graph TB
+    subgraph Consumers["🌐 Consumers"]
+        MA[Mobile App]
+        WA[Web App]
+        PA[Partner API]
+        OP[Ops Portal]
+    end
+
+    subgraph K8S["☸️  Kubernetes Cluster (namespace: rdas)"]
+        direction TB
+
+        subgraph Ingress["Ingress Layer"]
+            IG[NGINX Ingress\n/api  /swagger-ui  /api-docs]
+        end
+
+        subgraph Pods["RDAS Pod  ×2–10  (HPA)"]
+            direction TB
+
+            subgraph Controllers["Controllers (Spring MVC)"]
+                CC[CountryController\nGET /api/v1/countries]
+                RC[ReferenceDataController\nGET /continents /currencies /languages]
+                CacheCTRL[CacheController\nGET|POST /api/v1/cache]
+            end
+
+            subgraph Service["Service Layer"]
+                CS[CountryServiceImpl\nFilter · Sort · Paginate]
+            end
+
+            subgraph Cache["Cache Layer"]
+                AR["AtomicReference&lt;CachedData&gt;\n(Caffeine · max 500 · TTL 2 h)"]
+                CD["CachedData\ncountries · continents\ncurrencies · indices"]
+            end
+
+            subgraph Background["Background Tasks"]
+                PC["@PostConstruct\nwarm-up"]
+                SC["@Scheduled\nhourly refresh"]
+            end
+
+            subgraph Client["SOAP Client"]
+                SC2[CountryInfoSoapClient\nXXE-hardened · RestTemplate]
+            end
+
+            subgraph Observability["Observability"]
+                HI[SoapServiceHealthIndicator\n/actuator/health]
+                SW[SpringDoc OpenAPI\n/swagger-ui.html]
+            end
+        end
+
+        CM[ConfigMap\nrdas-config]
+    end
+
+    subgraph Upstream["☁️  External SOAP Service"]
+        SOAP["CountryInfo WSDL\nwebservices.oorsprong.org\nFullCountryInfoAllCountries\nListOfContinentsByName\nListOfCurrenciesByName"]
+    end
+
+    MA & WA & PA & OP -->|HTTPS REST/JSON| IG
+    IG -->|routes| CC & RC & CacheCTRL
+    CC & RC & CacheCTRL --> CS
+    CS --> AR
+    AR --- CD
+    PC & SC --> SC2
+    SC2 -->|HTTP SOAP| SOAP
+    SC2 -->|parsed DTOs| AR
+    CM -.->|env vars| Pods
+    HI --- AR
 ```
- Consumers                      RDAS                       Upstream
-──────────            ──────────────────────────────    ──────────────────
-Mobile App  ──────►  ┌──────────────────────────────┐
-Web App     ──────►  │  REST/JSON API (Spring Boot)  │
-Partner API ──────►  │                               │  HTTP SOAP
-Ops Portal  ──────►  │  ┌─────────────────────────┐ │ ──────────────────►
-                     │  │  In-Memory Cache          │ │   CountryInfo WSDL
-                     │  │  (Caffeine / AtomicRef)   │ │ ◄──────────────────
-                     │  └─────────────────────────┘ │
-                     │  ┌─────────────────────────┐ │
-                     │  │  Filtering / Sorting /    │ │
-                     │  │  Pagination Engine        │ │
-                     │  └─────────────────────────┘ │
-                     └──────────────────────────────┘
+
+### Request Flow
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant CDN as Pull CDN
+    participant LB as L7 Load Balancer
+    participant Pod as RDAS Pod
+    participant Cache as AtomicReference&lt;CachedData&gt;
+    participant SOAP as CountryInfo SOAP
+
+    Client->>CDN: GET /api/v1/countries
+    alt Cache-Control hit (max-age=3600)
+        CDN-->>Client: 200 OK (cached)
+    else CDN miss
+        CDN->>LB: forward
+        LB->>Pod: route to least-loaded pod
+        Pod->>Cache: getData()
+        alt Cache populated
+            Cache-->>Pod: CachedData snapshot (atomic read)
+            Pod-->>CDN: 200 OK + Cache-Control header
+            CDN-->>Client: 200 OK
+        else Cache empty (cold start + SOAP down)
+            Pod-->>Client: 503 Service Unavailable
+        end
+    end
+
+    Note over Pod,SOAP: Background refresh (every 1 hour)
+    Pod->>SOAP: FullCountryInfoAllCountries (3 SOAP calls)
+    SOAP-->>Pod: XML response
+    Pod->>Cache: AtomicReference.set(newSnapshot) — atomic swap
+```
+
+### Cache Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> EMPTY : Pod starts
+
+    EMPTY --> WARM : @PostConstruct\n3 SOAP calls succeed
+    EMPTY --> EMPTY : @PostConstruct fails\n(SOAP down) — app still starts
+
+    WARM --> REFRESHING : @Scheduled fires\n(every 1 hour)
+    REFRESHING --> WARM : SOAP calls succeed\nAtomicReference.set(newData)
+    REFRESHING --> STALE : SOAP calls fail\nprevious snapshot retained
+
+    STALE --> REFRESHING : next @Scheduled tick
+    STALE --> WARM : POST /api/v1/cache/refresh\n+ SOAP recovers
+
+    WARM --> WARM : all read requests served\nfrom in-process memory
+
+    state WARM {
+        [*] --> Serving
+        Serving --> Serving : O(1) Map lookup\n~100 ns per request
+    }
 ```
 
 ### Components
@@ -115,3 +223,80 @@ With a 100 req/min SOAP quota the service uses **< 0.05 %** of the limit.
 | SOAP call exception rate | Micrometer `rdas.soap.error` counter | Alert if > 5 failures in 5 min |
 | K8s pod readiness failing | Readiness probe | K8s restarts / HPA stops scaling in |
 | 503 response spike | API Gateway metrics | Alert if > 1 % of requests return 503 |
+
+---
+
+## Kubernetes Deployment Architecture
+
+```mermaid
+graph TB
+    subgraph Internet["🌍 Internet"]
+        Client[Client / CDN]
+    end
+
+    subgraph Cluster["☸️  Kubernetes Cluster"]
+        direction TB
+
+        subgraph NS["namespace: rdas"]
+            direction TB
+
+            ING["Ingress (NGINX)\nrdas-ingress\n/api  /swagger-ui  /api-docs"]
+
+            SVC["Service (ClusterIP)\nrdas-service\nport 80 → 8080"]
+
+            subgraph DEP["Deployment: rdas  (replicas: 2–10)"]
+                direction LR
+                P1["Pod 1\nrdas:latest\nCPU: 250m–1000m\nRAM: 512Mi–1Gi"]
+                P2["Pod 2\nrdas:latest\nCPU: 250m–1000m\nRAM: 512Mi–1Gi"]
+                PN["Pod N\n(HPA scales up)"]
+            end
+
+            HPA["HPA\nmin=2 max=10\nCPU≥70% · Mem≥80%"]
+            CM["ConfigMap\nrdas-config\nSOAP endpoint · timeouts · cache TTL"]
+            SA["ServiceAccount\nrdas-sa"]
+        end
+    end
+
+    subgraph Probes["Health Probes"]
+        LP["Liveness\nGET /actuator/health/liveness\ninitialDelay=60s period=30s"]
+        RP["Readiness\nGET /actuator/health/readiness\ninitialDelay=30s period=10s"]
+        SP["Startup\nGET /actuator/health/liveness\nfailureThreshold=30 period=10s"]
+    end
+
+    Client -->|HTTPS| ING
+    ING --> SVC
+    SVC --> P1 & P2 & PN
+    HPA -.->|scales| DEP
+    CM -.->|env vars| P1 & P2 & PN
+    SA -.->|bound to| DEP
+    LP & RP & SP -.->|probe| P1 & P2
+```
+
+## Scaling Strategy
+
+```mermaid
+graph LR
+    subgraph Traffic["Traffic Tiers"]
+        T1["20M req/day\n~231 req/s avg\n~700 req/s peak"]
+    end
+
+    subgraph Layers["Serving Layers  (left = cheapest/fastest)"]
+        L1["L1 Pull CDN\n~100 req/s absorbed\nCache-Control max-age=3600\nCost: near zero"]
+        L2["L2 NGINX L7 LB\nSSL termination\ngzip compression\n80 KB → 12 KB"]
+        L3["L3 Caffeine (per pod)\n~100 ns read\n10 MB heap\nfits in 2 pods at peak"]
+        L4["L4 Redis Cluster\n~500 µs read\nCross-pod shared cache\nDistributed refresh lock"]
+        L5["L5 SOAP (upstream)\n~500 ms\n3 calls/hour max\nNEVER on critical path"]
+    end
+
+    T1 --> L1
+    L1 -->|CDN miss| L2
+    L2 --> L3
+    L3 -->|expired| L4
+    L4 -->|background only| L5
+
+    style L1 fill:#d4edda,stroke:#28a745
+    style L2 fill:#d4edda,stroke:#28a745
+    style L3 fill:#cce5ff,stroke:#004085
+    style L4 fill:#fff3cd,stroke:#856404
+    style L5 fill:#f8d7da,stroke:#721c24
+```
